@@ -1,0 +1,66 @@
+#: Update system scripts and packages (dialog, multi‑distro)
+
+# --- KSO multi‑distro bootstrap ---
+KSO_ETC_DIR="/etc/kso"
+KSO_LIB="$KSO_ETC_DIR/lib.sh"
+if [ ! -f "$KSO_LIB" ]; then
+  mkdir -p "$KSO_ETC_DIR"
+  cat > "$KSO_LIB" <<'LIB'
+#!/usr/bin/env bash
+set -o pipefail
+KSO_ETC_DIR="/etc/kso"; KSO_INFODIST="$KSO_ETC_DIR/infodist"
+kso_detect_distro(){ [ -r /etc/os-release ] && . /etc/os-release;
+  DIST_ID="${ID:-unknown}"; DIST_NAME="${NAME:-Unknown}"; DIST_VERSION_ID="${VERSION_ID:-}"; DIST_ID_LIKE="${ID_LIKE:-}";
+  if echo "$DIST_ID $DIST_ID_LIKE" | grep -qi ubuntu; then DIST_FAMILY="ubuntu"; else DIST_FAMILY="debian"; fi; }
+kso_write_infodist(){ mkdir -p "$KSO_ETC_DIR"; : > "$KSO_INFODIST"; echo "DIST_ID=$DIST_ID" >> "$KSO_INFODIST"; }
+LIB
+  chmod +x "$KSO_LIB"
+fi
+. "$KSO_LIB" 2>/dev/null || true
+if [ ! -f "/etc/kso/infodist" ]; then
+  if command -v kso >/dev/null 2>&1; then
+    echo "ℹ️  /etc/kso/infodist missing — running 'kso init'…"
+    kso init || { echo "❌ Failed to initialize KSO."; exit 1; }
+  else
+    echo "❌ KSO not installed. Install kso and run 'sudo kso init'."
+    exit 1
+  fi
+fi
+# --- end bootstrap ---
+
+#!/usr/bin/env bash
+#:Update KarmaOS scripts and system packages (interactive dialog)
+
+# Protection: only executable via 'kso'
+PARENT_CMD=$(ps -o comm= $PPID)
+if [[ "$PARENT_CMD" != "kso" ]]; then
+  dialog --title "KarmaOS Update" --msgbox "❌ This script must be executed through the 'kso' command only." 7 60
+  exit 1
+fi
+
+# Ensure dialog is present
+if ! command -v dialog >/dev/null 2>&1; then
+  apt update && apt install -y dialog
+fi
+
+# 1. Update scripts
+dialog --title "KarmaOS Update" --infobox "Updating KarmaOS script cache..." 5 50
+kso script update > /tmp/kso-script-update.log 2>&1
+sleep 1
+
+# 2. Update system packages
+dialog --title "KarmaOS Update" --infobox "Updating system packages...\nThis may take a while." 6 60
+apt update > /tmp/kso-apt-update.log 2>&1
+apt full-upgrade -y > /tmp/kso-apt-upgrade.log 2>&1
+
+if [ $? -eq 0 ]; then
+  dialog --title "KarmaOS Update" --msgbox "✅ System update completed successfully!" 7 50
+else
+  dialog --title "KarmaOS Update" --msgbox "❌ System update failed!\n\nSee logs for details." 8 60
+  # Optionally show log on failure
+  dialog --textbox /tmp/kso-apt-upgrade.log 20 70
+  exit 1
+fi
+
+clear
+exit 0

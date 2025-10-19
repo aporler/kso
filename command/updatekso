@@ -1,0 +1,94 @@
+#: Update kso core (dialog) – prefers /kso, falls back to /karma
+
+# --- KSO multi‑distro bootstrap ---
+KSO_ETC_DIR="/etc/kso"
+KSO_LIB="$KSO_ETC_DIR/lib.sh"
+if [ ! -f "$KSO_LIB" ]; then
+  mkdir -p "$KSO_ETC_DIR"
+  cat > "$KSO_LIB" <<'LIB'
+#!/usr/bin/env bash
+set -o pipefail
+KSO_ETC_DIR="/etc/kso"; KSO_INFODIST="$KSO_ETC_DIR/infodist"
+kso_detect_distro(){ [ -r /etc/os-release ] && . /etc/os-release;
+  DIST_ID="${ID:-unknown}"; DIST_NAME="${NAME:-Unknown}"; DIST_VERSION_ID="${VERSION_ID:-}"; DIST_ID_LIKE="${ID_LIKE:-}";
+  if echo "$DIST_ID $DIST_ID_LIKE" | grep -qi ubuntu; then DIST_FAMILY="ubuntu"; else DIST_FAMILY="debian"; fi; }
+kso_write_infodist(){ mkdir -p "$KSO_ETC_DIR"; : > "$KSO_INFODIST"; echo "DIST_ID=$DIST_ID" >> "$KSO_INFODIST"; }
+LIB
+  chmod +x "$KSO_LIB"
+fi
+. "$KSO_LIB" 2>/dev/null || true
+if [ ! -f "/etc/kso/infodist" ]; then
+  if command -v kso >/dev/null 2>&1; then
+    echo "ℹ️  /etc/kso/infodist missing — running 'kso init'…"
+    kso init || { echo "❌ Failed to initialize KSO."; exit 1; }
+  else
+    echo "❌ KSO not installed. Install kso and run 'sudo kso init'."
+    exit 1
+  fi
+fi
+# --- end bootstrap ---
+
+#!/usr/bin/env bash
+#:Check and update the 'kso' core command from the official KarmaOS repository (dialog version)
+
+KSO_BIN_PATH="/usr/local/bin/kso"
+KSO_RELEASE_URL="https://dep.karmaos.ovh/kso/kso.release"
+TMP_RELEASE="/tmp/kso.release"
+TMP_NEW_KSO="/tmp/kso.new"
+
+# Only run via kso
+PARENT_CMD=$(ps -o comm= $PPID)
+if [[ "$PARENT_CMD" != "kso" ]]; then
+  dialog --title "KSO Updater" --msgbox "❌ This command must be run via 'kso updatekso'." 7 60
+  exit 1
+fi
+
+# Ensure dialog is present
+if ! command -v dialog >/dev/null 2>&1; then
+  apt update && apt install -y dialog
+fi
+
+# Get local version
+LOCAL_VERSION=$(grep -i "^#:" "$KSO_BIN_PATH" | grep -i "version=" | cut -d= -f2 | tr -d '[:space:]')
+
+if [[ -z "$LOCAL_VERSION" ]]; then
+  LOCAL_VERSION="0.0"
+fi
+
+dialog --title "KSO Updater" --infobox "Local kso version: $LOCAL_VERSION\nChecking for latest release..." 7 50
+sleep 1
+
+# Download release info
+if ! curl -fsSL "$KSO_RELEASE_URL" -o "$TMP_RELEASE"; then
+  dialog --title "KSO Updater" --msgbox "❌ Failed to fetch release info from:\n$KSO_RELEASE_URL" 8 60
+  exit 1
+fi
+
+REMOTE_VERSION=$(grep '^VERSION=' "$TMP_RELEASE" | cut -d= -f2 | tr -d '[:space:]')
+REMOTE_URL=$(grep '^URL=' "$TMP_RELEASE" | cut -d= -f2 | tr -d '[:space:]')
+
+dialog --title "KSO Updater" --infobox "Latest available version: $REMOTE_VERSION" 6 50
+sleep 1
+
+# Compare versions
+if [[ "$REMOTE_VERSION" == "$LOCAL_VERSION" ]]; then
+  dialog --title "KSO Updater" --msgbox "✅ kso is already up to date (version $LOCAL_VERSION)." 7 60
+  exit 0
+fi
+
+dialog --title "KSO Updater" --infobox "Updating kso to version $REMOTE_VERSION..." 6 50
+sleep 1
+
+# Download new kso
+if ! curl -fsSL "$REMOTE_URL" -o "$TMP_NEW_KSO"; then
+  dialog --title "KSO Updater" --msgbox "❌ Failed to download new kso version from:\n$REMOTE_URL" 8 60
+  exit 1
+fi
+
+chmod +x "$TMP_NEW_KSO"
+mv "$TMP_NEW_KSO" "$KSO_BIN_PATH"
+
+dialog --title "KSO Updater" --msgbox "✅ kso successfully updated to version $REMOTE_VERSION." 7 60
+
+clear
+exit 0

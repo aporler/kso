@@ -1,0 +1,74 @@
+#: Check OS status and available upgrades (multi‑distro)
+
+# --- KSO multi‑distro bootstrap ---
+KSO_ETC_DIR="/etc/kso"
+KSO_LIB="$KSO_ETC_DIR/lib.sh"
+if [ ! -f "$KSO_LIB" ]; then
+  mkdir -p "$KSO_ETC_DIR"
+  cat > "$KSO_LIB" <<'LIB'
+#!/usr/bin/env bash
+set -o pipefail
+KSO_ETC_DIR="/etc/kso"; KSO_INFODIST="$KSO_ETC_DIR/infodist"
+kso_detect_distro(){ [ -r /etc/os-release ] && . /etc/os-release;
+  DIST_ID="${ID:-unknown}"; DIST_NAME="${NAME:-Unknown}"; DIST_VERSION_ID="${VERSION_ID:-}"; DIST_ID_LIKE="${ID_LIKE:-}";
+  if echo "$DIST_ID $DIST_ID_LIKE" | grep -qi ubuntu; then DIST_FAMILY="ubuntu"; else DIST_FAMILY="debian"; fi; }
+kso_write_infodist(){ mkdir -p "$KSO_ETC_DIR"; : > "$KSO_INFODIST"; echo "DIST_ID=$DIST_ID" >> "$KSO_INFODIST"; }
+LIB
+  chmod +x "$KSO_LIB"
+fi
+. "$KSO_LIB" 2>/dev/null || true
+if [ ! -f "/etc/kso/infodist" ]; then
+  if command -v kso >/dev/null 2>&1; then
+    echo "ℹ️  /etc/kso/infodist missing — running 'kso init'…"
+    kso init || { echo "❌ Failed to initialize KSO."; exit 1; }
+  else
+    echo "❌ KSO not installed. Install kso and run 'sudo kso init'."
+    exit 1
+  fi
+fi
+# --- end bootstrap ---
+
+#!/usr/bin/env bash
+#:Check if a newer version of KarmaOS is available online
+
+# Protection: this script must be executed via the 'kso' command only
+PARENT_CMD=$(ps -o comm= $PPID)
+if [[ "$PARENT_CMD" != "kso" ]]; then
+  echo "❌ This script must be executed through the 'kso' command only."
+  exit 1
+fi
+
+OS_FILE="/etc/karmaos-release"
+REMOTE_URL="https://dep.karmaos.ovh/kso/release.php"
+
+# Lire la version locale
+if [ ! -f "$OS_FILE" ]; then
+  echo "⚠️  Cannot find $OS_FILE."
+  exit 1
+fi
+
+local_version=$(grep '^VERSION_ID=' "$OS_FILE" | cut -d= -f2 | tr -d '"')
+
+if [ -z "$local_version" ]; then
+  echo "⚠️  Unable to read local version."
+  exit 1
+fi
+
+# Obtenir la version distante
+remote_info=$(curl -s "$REMOTE_URL?os=$local_version")
+latest_version=$(echo "$remote_info" | grep -oP 'currentrelease=\K[0-9]+')
+
+if [ -z "$latest_version" ]; then
+  echo "⚠️  Unable to retrieve online version info."
+  exit 1
+fi
+
+echo "🖥️  Local version: $local_version"
+echo "🌐 Latest version: $latest_version"
+
+# Comparaison
+if [ "$latest_version" -gt "$local_version" ]; then
+  echo "⬆️  A new version of KarmaOS is available!"
+else
+  echo "✅ You are running the latest version of KarmaOS."
+fi

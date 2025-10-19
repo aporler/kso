@@ -1,0 +1,333 @@
+#: Guided setup for KSO across Debian/Ubuntu/Zorin/KarmaOS
+
+# --- KSO multi‑distro bootstrap ---
+KSO_ETC_DIR="/etc/kso"
+KSO_LIB="$KSO_ETC_DIR/lib.sh"
+if [ ! -f "$KSO_LIB" ]; then
+  mkdir -p "$KSO_ETC_DIR"
+  cat > "$KSO_LIB" <<'LIB'
+#!/usr/bin/env bash
+set -o pipefail
+KSO_ETC_DIR="/etc/kso"; KSO_INFODIST="$KSO_ETC_DIR/infodist"
+kso_detect_distro(){ [ -r /etc/os-release ] && . /etc/os-release;
+  DIST_ID="${ID:-unknown}"; DIST_NAME="${NAME:-Unknown}"; DIST_VERSION_ID="${VERSION_ID:-}"; DIST_ID_LIKE="${ID_LIKE:-}";
+  if echo "$DIST_ID $DIST_ID_LIKE" | grep -qi ubuntu; then DIST_FAMILY="ubuntu"; else DIST_FAMILY="debian"; fi; }
+kso_write_infodist(){ mkdir -p "$KSO_ETC_DIR"; : > "$KSO_INFODIST"; echo "DIST_ID=$DIST_ID" >> "$KSO_INFODIST"; }
+LIB
+  chmod +x "$KSO_LIB"
+fi
+. "$KSO_LIB" 2>/dev/null || true
+if [ ! -f "/etc/kso/infodist" ]; then
+  if command -v kso >/dev/null 2>&1; then
+    echo "ℹ️  /etc/kso/infodist missing — running 'kso init'…"
+    kso init || { echo "❌ Failed to initialize KSO."; exit 1; }
+  else
+    echo "❌ KSO not installed. Install kso and run 'sudo kso init'."
+    exit 1
+  fi
+fi
+# --- end bootstrap ---
+
+#!/usr/bin/env bash
+#NAME: Config Tool
+#DESC: First-time setup, connectivity check with Wi‑Fi helper, and basic system config. Uses 'kso update' for updates.
+
+set -o pipefail
+
+# ---------------------------------------------------------------------------
+# Safety: must be called via 'kso' (allow override for debug with KSO_ALLOW_STANDALONE=1)
+PARENT_CMD=$(ps -o comm= $PPID 2>/dev/null)
+if [[ "$KSO_ALLOW_STANDALONE" != "1" && "$PARENT_CMD" != "kso" ]]; then
+  echo "❌ This tool must be executed through the 'kso' command only."
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# UI helpers
+say()  { printf "%b\n" "$*"; }
+ok()   { say "✅ $*"; }
+info() { say "ℹ️  $*"; }
+warn() { say "⚠️  $*"; }
+err()  { say "❌ $*"; exit 1; }
+
+# ---------------------------------------------------------------------------
+# dialog requirement
+require_dialog() {
+  if command -v dialog >/dev/null 2>&1; then return 0; fi
+  echo "Installing 'dialog' for interactive menus…"
+  if command -v apt-get >/dev/null 2>&1; then
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get update -y || true
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y dialog || {
+      echo "Failed to install 'dialog'."
+      return 1
+    }
+    return 0
+  fi
+  echo "APT not available; cannot install 'dialog'."
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Connectivity + Wi‑Fi helper
+is_online() {
+  # HTTPS test (preferred). Try Debian then Ubuntu mirrors.
+  curl -fsS --max-time 4 https://deb.debian.org >/dev/null 2>&1 || \
+  curl -fsS --max-time 4 https://archive.ubuntu.com >/dev/null 2>&1
+}
+
+have_networkmanager() {
+  command -v nmcli >/dev/null 2>&1 || command -v nmtui >/dev/null 2>&1
+}
+
+ensure_networkmanager() {
+  if have_networkmanager; then return 0; fi
+  dialog --title "Install NetworkManager" --yesno "NetworkManager is not installed.\nInstall it now to manage Wi‑Fi easily?" 9 64
+  if [ $? -ne 0 ]; then return 1; fi
+  sudo env DEBIAN_FRONTEND=noninteractive apt-get update -y || true
+  sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y network-manager || {
+    dialog --title "Error" --msgbox "Failed to install NetworkManager." 7 52
+    return 1
+  }
+  sudo systemctl enable NetworkManager >/dev/null 2>&1 || true
+  sudo systemctl start  NetworkManager >/dev/null 2>&1 || true
+}
+
+wifi_connect_flow() {
+  ensure_networkmanager || return 1
+  if command -v nmtui >/dev/null 2>&1; then
+    dialog --title "Wi‑Fi" --msgbox "A text UI (nmtui) will open.\nSelect 'Activate a connection' to connect to Wi‑Fi.\nReturn here after completing." 9 64
+    sudo nmtui
+  else
+    SSID=$(dialog --inputbox "Enter Wi‑Fi SSID:" 8 50 3>&1 1>&2 2>&3)
+    [ -z "$SSID" ] && return 1
+    PSK=$(dialog --insecure --passwordbox "Enter Wi‑Fi password (PSK) for \"$SSID\":" 9 60 3>&1 1>&2 2>&3)
+    [ -z "$PSK" ] && return 1
+    sudo nmcli dev wifi connect "$SSID" password "$PSK" || \
+      dialog --title "Error" --msgbox "Failed to connect to \"$SSID\"." 7 50
+  fi
+}
+
+# Action: check/connect internet with clear status
+connectivity_action() {
+  require_dialog || { echo "No 'dialog' available."; return 1; }
+
+  if is_online; then
+    dialog --title "Connectivity" --msgbox "Status: Connected to the Internet." 7 40
+    clear; return 0
+  else
+    # Show explicit offline status, then offer Wi‑Fi
+    dialog --title "Connectivity" --msgbox "Status: Offline.\nLet's try Wi‑Fi setup." 8 50
+    wifi_connect_flow
+    if is_online; then
+      dialog --title "Connectivity" --msgbox "Status: Connected after Wi‑Fi setup." 7 50
+      clear; return 0
+    else
+      dialog --title "Connectivity" --msgbox "Still offline after Wi‑Fi attempt.\nYou can try again later." 8 54
+      clear; return 1
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Updates: ALWAYS prefer 'kso update' (fallback to APT only if 'kso' is missing)
+kso_update_safe() {
+  if command -v kso >/dev/null 2>&1; then
+    # Use kso update, and show result
+    if sudo kso update; then
+      ok "'kso update' completed."
+      return 0
+    else
+      warn "'kso update' encountered issues."
+      return 1
+    fi
+  else
+    # Fallback only if kso is not available (fresh non‑KarmaOS install)
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get update -y || return 1
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y || return 1
+    ok "System updated via APT (kso not found)."
+    return 0
+  fi
+}
+
+apt_install_safe() {
+  local pkg="$1"
+  # Try to ensure network (don’t loop forever)
+  is_online || connectivity_action || true
+  if ! is_online; then
+    warn "Skipping install of '$pkg' due to no internet."
+    return 1
+  fi
+  sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "$pkg"
+}
+
+# ---------------------------------------------------------------------------
+# First-time setup after install
+first_time_setup() {
+  require_dialog || { echo "Dialog is required for first‑time setup."; return 1; }
+
+  # Step 1: Make sure we are online (and visible to user)
+  connectivity_action || true
+
+  # Step 2: Always use kso update (fallback to APT only if kso missing)
+  dialog --infobox "Running system update (via 'kso update')…" 5 60
+  if kso_update_safe; then
+    sleep 1
+  else
+    sleep 1
+  fi
+  clear
+
+  # Step 3: Choose role (Server or Desktop)
+  ROLE=$(dialog --clear --title "First‑time setup" --radiolist "Select system role:" 12 60 2 \
+    "Server"  "Headless or server use (OpenSSH, build tools, etc.)" on \
+    "Desktop" "Graphical XFCE desktop (Firefox, LibreOffice, etc.)" off \
+    3>&1 1>&2 2>&3)
+  [ -z "$ROLE" ] && { clear; return 0; }
+
+  # Step 4: Install role packages
+  dialog --infobox "Installing base packages for '$ROLE'…" 5 60
+  sleep 1
+
+  if [ "$ROLE" = "Server" ]; then
+    # Server profile: sane defaults
+    PKGS=(
+      openssh-server
+      build-essential   # (gcc, g++, make)
+      curl ca-certificates
+      git htop
+      dialog            # ensure dialog present
+    )
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get update -y || true
+    for p in "${PKGS[@]}"; do apt_install_safe "$p" || true; done
+    ok "Server base packages processed."
+
+  else
+    # Desktop profile (XFCE + essentials).
+    # Note: display manager will be prompted if missing; lightdm is a common choice.
+    PKGS=(
+      xfce4 xfce4-goodies
+      network-manager
+      lightdm
+      firefox
+      libreoffice
+      language-pack-en language-pack-en-base
+      language-pack-fr language-pack-fr-base
+      hunspell-en-us hunspell-fr
+      libreoffice-help-en-gb libreoffice-help-fr
+      libreoffice-l10n-en-gb libreoffice-l10n-fr
+      leafpad
+      curl ca-certificates
+      dialog
+    )
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get update -y || true
+    for p in "${PKGS[@]}"; do apt_install_safe "$p" || true; done
+
+    # Enable & start NM for Wi‑Fi on desktop
+    sudo systemctl enable NetworkManager >/dev/null 2>&1 || true
+    sudo systemctl start  NetworkManager >/dev/null 2>&1 || true
+
+    ok "Desktop base packages processed."
+  fi
+
+  dialog --title "First‑time setup" --msgbox "First‑time setup for '$ROLE' is done.\nYou can run this again anytime." 7 60
+  clear
+}
+
+# ---------------------------------------------------------------------------
+# Other config actions
+set_hostname() {
+  require_dialog || { err "'dialog' is required for this action."; }
+  CUR=$(hostnamectl --static 2>/dev/null || hostname 2>/dev/null)
+  NEW=$(dialog --inputbox "Enter new hostname:" 8 50 "$CUR" 3>&1 1>&2 2>&3)
+  [ -z "$NEW" ] && return 0
+  if sudo hostnamectl set-hostname "$NEW"; then
+    dialog --msgbox "Hostname set to: $NEW" 6 40
+  else
+    dialog --msgbox "Failed to set hostname." 6 40
+  fi
+  clear
+}
+
+configure_timezone() {
+  require_dialog || { err "'dialog' is required for this action."; }
+  CHOICE=$(dialog --clear --title "Timezone" --menu "Select a timezone:" 15 50 8 \
+    "America/Toronto"   "Eastern (Canada)" \
+    "America/Montreal"  "Quebec (Montréal)" \
+    "America/New_York"  "Eastern (US)" \
+    "America/Vancouver" "Pacific (Canada)" \
+    "UTC"               "Coordinated Universal Time" \
+    3>&1 1>&2 2>&3)
+  [ -z "$CHOICE" ] && { clear; return 0; }
+  if sudo timedatectl set-timezone "$CHOICE"; then
+    dialog --msgbox "Timezone set to: $CHOICE" 6 40
+  else
+    dialog --msgbox "Failed to set timezone." 6 40
+  fi
+  clear
+}
+
+install_common_tools() {
+  require_dialog || true
+  CHOICES=$(dialog --separate-output --checklist "Select tools to install:" 16 60 8 \
+    curl        "HTTP client"                         ON \
+    jq          "JSON CLI"                            ON \
+    git         "Version control"                     OFF \
+    network-manager "Wi‑Fi/network manager"          OFF \
+    whiptail    "TUI dialogs (alt)"                   OFF \
+    dialog      "TUI dialogs"                         ON \
+    htop        "Process viewer"                      OFF \
+    ca-certificates "TLS certificates"                ON \
+    3>&1 1>&2 2>&3)
+  clear
+  [ -z "$CHOICES" ] && return 0
+  sudo env DEBIAN_FRONTEND=noninteractive apt-get update -y || true
+  for p in $CHOICES; do apt_install_safe "$p" || true; done
+  dialog --msgbox "Selected tools processed." 6 40
+  clear
+}
+
+run_kso_init_if_present() {
+  if command -v kso >/dev/null 2>&1; then
+    if sudo kso init; then
+      dialog --msgbox "'kso init' completed." 6 40
+    else
+      dialog --msgbox "'kso init' returned a non-zero exit code." 7 50
+    fi
+    clear
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Main menu (1st item = First-time setup)
+main_menu() {
+  require_dialog || {
+    echo "Dialog is not available; running minimal non-interactive checks…"
+    connectivity_action || true
+    kso_update_safe || true
+    exit 0
+  }
+
+  while true; do
+    CHOICE=$(dialog --clear --title "KarmaOS - Config Tool" --menu "Select an action:" 18 78 10 \
+      1 "First-time setup after install (role: Server/Desktop, then kso update + base packages)" \
+      2 "Check/Connect to Internet (shows status; tries Wi‑Fi if offline)" \
+      3 "Install common tools (curl, jq, dialog, etc.)" \
+      4 "Set hostname" \
+      5 "Set timezone" \
+      6 "Run 'kso init' (if available)" \
+      7 "Exit" \
+      3>&1 1>&2 2>&3)
+
+    case "$CHOICE" in
+      1) first_time_setup ;;
+      2) connectivity_action ;;
+      3) install_common_tools ;;
+      4) set_hostname ;;
+      5) configure_timezone ;;
+      6) run_kso_init_if_present ;;
+      7|"") clear; break ;;
+    esac
+  done
+}
+
+main_menu

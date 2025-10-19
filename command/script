@@ -1,0 +1,140 @@
+#: Manage and run official KSO scripts
+
+# --- KSO multi‑distro bootstrap ---
+KSO_ETC_DIR="/etc/kso"
+KSO_LIB="$KSO_ETC_DIR/lib.sh"
+if [ ! -f "$KSO_LIB" ]; then
+  mkdir -p "$KSO_ETC_DIR"
+  cat > "$KSO_LIB" <<'LIB'
+#!/usr/bin/env bash
+set -o pipefail
+KSO_ETC_DIR="/etc/kso"; KSO_INFODIST="$KSO_ETC_DIR/infodist"
+kso_detect_distro(){ [ -r /etc/os-release ] && . /etc/os-release;
+  DIST_ID="${ID:-unknown}"; DIST_NAME="${NAME:-Unknown}"; DIST_VERSION_ID="${VERSION_ID:-}"; DIST_ID_LIKE="${ID_LIKE:-}";
+  if echo "$DIST_ID $DIST_ID_LIKE" | grep -qi ubuntu; then DIST_FAMILY="ubuntu"; else DIST_FAMILY="debian"; fi; }
+kso_write_infodist(){ mkdir -p "$KSO_ETC_DIR"; : > "$KSO_INFODIST"; echo "DIST_ID=$DIST_ID" >> "$KSO_INFODIST"; }
+LIB
+  chmod +x "$KSO_LIB"
+fi
+. "$KSO_LIB" 2>/dev/null || true
+if [ ! -f "/etc/kso/infodist" ]; then
+  if command -v kso >/dev/null 2>&1; then
+    echo "ℹ️  /etc/kso/infodist missing — running 'kso init'…"
+    kso init || { echo "❌ Failed to initialize KSO."; exit 1; }
+  else
+    echo "❌ KSO not installed. Install kso and run 'sudo kso init'."
+    exit 1
+  fi
+fi
+# --- end bootstrap ---
+
+#!/usr/bin/env bash
+#:Manage and run official KarmaOS scripts
+
+# Protection: this script must be executed via the 'kso' command only
+PARENT_CMD=$(ps -o comm= $PPID)
+if [[ "$PARENT_CMD" != "kso" ]]; then
+  echo "❌ This script must be executed through the 'kso' command only."
+  exit 1
+fi
+
+KSO_SCRIPT_CACHE="/etc/kso/cache/script"
+KSO_USER_AGENT="KSO/1.0"
+
+# Vérifie que curl est dispo
+command -v curl >/dev/null 2>&1 || {
+  echo "❌ 'curl' is required but not installed."
+  exit 1
+}
+
+function handle_script_command() {
+  subcommand="$1"
+  param="$2"
+
+  case "$subcommand" in
+    update)
+      echo "🔄 Updating script cache from https://dep.karmaos.ovh/kso/scripts/index.php ..."
+      curl -A "$KSO_USER_AGENT" -fsSL https://dep.karmaos.ovh/kso/scripts/index.php -o "$KSO_SCRIPT_CACHE"
+      if [ $? -eq 0 ]; then
+        echo "✅ Script cache updated."
+      else
+        echo "❌ Failed to update script cache."
+      fi
+      ;;
+    list)
+      if [ ! -f "$KSO_SCRIPT_CACHE" ]; then
+        echo "❌ No cache file found. Run 'kso script update' first."
+        exit 1
+      fi
+      echo "📜 Available scripts:"
+      while IFS='|' read -r name file url desc; do
+        printf "  %-20s → %s\n" "$file" "$desc"
+      done < "$KSO_SCRIPT_CACHE"
+      ;;
+    info)
+      if [ -z "$param" ]; then
+        echo "❌ Please provide a script name."
+        exit 1
+      fi
+      if [ ! -f "$KSO_SCRIPT_CACHE" ]; then
+        echo "❌ No cache file found. Run 'kso script update' first."
+        exit 1
+      fi
+      param_clean="${param%.kso}"
+      found=false
+      while IFS='|' read -r name file url desc; do
+        file_clean="${file%.kso}"
+        if [[ "$file_clean" == "$param_clean" ]]; then
+          echo "📄 Name: $name"
+          echo "📁 File: $file"
+          echo "🔗 URL: $url"
+          echo "📝 Description: $desc"
+          found=true
+          break
+        fi
+      done < "$KSO_SCRIPT_CACHE"
+      if [ "$found" = false ]; then
+        echo "❌ Script '$param' not found in cache."
+      fi
+      ;;
+    run)
+      if [ -z "$param" ]; then
+        echo "❌ Please provide a script name to run."
+        exit 1
+      fi
+      if [ ! -f "$KSO_SCRIPT_CACHE" ]; then
+        echo "❌ No cache file found. Run 'kso script update' first."
+        exit 1
+      fi
+      param_clean="${param%.kso}"
+      found=false
+      while IFS='|' read -r name file url desc; do
+        file_clean="${file%.kso}"
+        if [[ "$file_clean" == "$param_clean" ]]; then
+          echo "🚀 Running $file from $url ..."
+          tmpfile=$(mktemp "/tmp/kso-${file}.XXXXXX")
+          curl -A "$KSO_USER_AGENT" -fsSL "$url" -o "$tmpfile"
+          if [ $? -eq 0 ]; then
+            chmod +x "$tmpfile"
+            "$tmpfile"
+            rm -f "$tmpfile"
+          else
+            echo "❌ Failed to download script."
+          fi
+          found=true
+          break
+        fi
+      done < "$KSO_SCRIPT_CACHE"
+      if [ "$found" = false ]; then
+        echo "❌ Script '$param' not found in cache."
+      fi
+      ;;
+    *)
+      echo "❌ Unknown subcommand for script."
+      echo "Available: update, list, info <script>, run <script>"
+      ;;
+  esac
+}
+
+# Dispatcher
+handle_script_command "$@"

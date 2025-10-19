@@ -1,0 +1,67 @@
+#: Windows-style shell session (multi‑distro)
+
+# --- KSO multi‑distro bootstrap ---
+KSO_ETC_DIR="/etc/kso"
+KSO_LIB="$KSO_ETC_DIR/lib.sh"
+if [ ! -f "$KSO_LIB" ]; then
+  mkdir -p "$KSO_ETC_DIR"
+  cat > "$KSO_LIB" <<'LIB'
+#!/usr/bin/env bash
+set -o pipefail
+KSO_ETC_DIR="/etc/kso"; KSO_INFODIST="$KSO_ETC_DIR/infodist"
+kso_detect_distro(){ [ -r /etc/os-release ] && . /etc/os-release;
+  DIST_ID="${ID:-unknown}"; DIST_NAME="${NAME:-Unknown}"; DIST_VERSION_ID="${VERSION_ID:-}"; DIST_ID_LIKE="${ID_LIKE:-}";
+  if echo "$DIST_ID $DIST_ID_LIKE" | grep -qi ubuntu; then DIST_FAMILY="ubuntu"; else DIST_FAMILY="debian"; fi; }
+kso_write_infodist(){ mkdir -p "$KSO_ETC_DIR"; : > "$KSO_INFODIST"; echo "DIST_ID=$DIST_ID" >> "$KSO_INFODIST"; }
+LIB
+  chmod +x "$KSO_LIB"
+fi
+. "$KSO_LIB" 2>/dev/null || true
+if [ ! -f "/etc/kso/infodist" ]; then
+  if command -v kso >/dev/null 2>&1; then
+    echo "ℹ️  /etc/kso/infodist missing — running 'kso init'…"
+    kso init || { echo "❌ Failed to initialize KSO."; exit 1; }
+  else
+    echo "❌ KSO not installed. Install kso and run 'sudo kso init'."
+    exit 1
+  fi
+fi
+# --- end bootstrap ---
+
+#!/usr/bin/env bash
+#:Start a Windows-style shell session for KarmaOS
+
+# Protection: only executable via 'kso'
+PARENT_CMD=$(ps -o comm= $PPID)
+if [[ "$PARENT_CMD" != "kso" ]]; then
+  echo "❌ This command must be run using 'kso cmd'"
+  exit 1
+fi
+
+# Créer un fichier temporaire contenant les alias
+TMPFILE="/tmp/kso-cmdwin-env-$$.sh"
+
+cat << 'EOF' > "$TMPFILE"
+# Windows-style aliases
+alias cls='clear'
+alias dir='ls -alF --color=auto'
+alias copy='cp -i'
+alias xcopy='cp -r -i'
+alias del='rm -i'
+alias move='mv -i'
+alias md='mkdir -p'
+alias rd='rmdir'
+alias type='cat'
+alias echo='echo'
+alias tree='tree -C'
+alias ver='uname -a'
+
+pause() {
+  read -p "Press any key to continue..." -n1 -s
+  echo
+}
+export -f pause
+EOF
+
+# Lancer un shell interactif avec les alias chargés
+bash --rcfile "$TMPFILE"

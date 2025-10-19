@@ -1,0 +1,53 @@
+#: Show distro/KarmaOS version (multi‑distro)
+
+# --- KSO multi‑distro bootstrap ---
+KSO_ETC_DIR="/etc/kso"
+KSO_LIB="$KSO_ETC_DIR/lib.sh"
+if [ ! -f "$KSO_LIB" ]; then
+  mkdir -p "$KSO_ETC_DIR"
+  cat > "$KSO_LIB" <<'LIB'
+#!/usr/bin/env bash
+set -o pipefail
+KSO_ETC_DIR="/etc/kso"; KSO_INFODIST="$KSO_ETC_DIR/infodist"
+kso_detect_distro(){ [ -r /etc/os-release ] && . /etc/os-release;
+  DIST_ID="${ID:-unknown}"; DIST_NAME="${NAME:-Unknown}"; DIST_VERSION_ID="${VERSION_ID:-}"; DIST_ID_LIKE="${ID_LIKE:-}";
+  if echo "$DIST_ID $DIST_ID_LIKE" | grep -qi ubuntu; then DIST_FAMILY="ubuntu"; else DIST_FAMILY="debian"; fi; }
+kso_write_infodist(){ mkdir -p "$KSO_ETC_DIR"; : > "$KSO_INFODIST"; echo "DIST_ID=$DIST_ID" >> "$KSO_INFODIST"; }
+LIB
+  chmod +x "$KSO_LIB"
+fi
+. "$KSO_LIB" 2>/dev/null || true
+if [ ! -f "/etc/kso/infodist" ]; then
+  if command -v kso >/dev/null 2>&1; then
+    echo "ℹ️  /etc/kso/infodist missing — running 'kso init'…"
+    kso init || { echo "❌ Failed to initialize KSO."; exit 1; }
+  else
+    echo "❌ KSO not installed. Install kso and run 'sudo kso init'."
+    exit 1
+  fi
+fi
+# --- end bootstrap ---
+
+#!/usr/bin/env bash
+#:Display the current installed version of KarmaOS
+
+# Protection: this script must be executed via the 'kso' command only
+PARENT_CMD=$(ps -o comm= $PPID)
+if [[ "$PARENT_CMD" != "kso" ]]; then
+  echo "❌ This script must be executed through the 'kso' command only."
+  exit 1
+fi
+
+
+if [ ! -f /etc/karmaos-release ]; then
+  echo "⚠️  /etc/karmaos-release not found."
+  exit 1
+fi
+
+# Extract version name and ID
+VERSION_NAME=$(grep '^VERSION=' /etc/karmaos-release | cut -d= -f2 | tr -d '"')
+VERSION_ID=$(grep '^VERSION_ID=' /etc/karmaos-release | cut -d= -f2 | tr -d '"')
+
+echo "🖥️  KarmaOS Version: $VERSION_NAME"
+echo "🔢 Internal Version Code: $VERSION_ID"
+
