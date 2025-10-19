@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+#: Version=2.00
+# KSO – multi‑distro (KarmaOS/Ubuntu/Debian/Zorin) core launcher
+
+set -o pipefail
+
+if [ "$EUID" -ne 0 ]; then
+  echo "❌ This command must be run as root (use sudo)."
+  exit 1
+fi
+
+KSO_DIR="/etc/kso"
+KSO_COMMANDS_DIR="$KSO_DIR/command"
+KSO_CACHE_DIR="$KSO_DIR/cache"
+KSO_LIB="$KSO_DIR/lib.sh"
+
+PRIMARY_REMOTE="${KSO_REMOTE_BASE:-https://dep.karmaos.ovh/kso}"
+FALLBACK_REMOTE="https://dep.karmaos.ovh/karma"
+REMOTE_BASE_URL="$PRIMARY_REMOTE/command"
+
+FILES_TO_DOWNLOAD=(checkos cmd script update updatekso version config)
+
+ensure_layout() {
+  mkdir -p "$KSO_COMMANDS_DIR" "$KSO_CACHE_DIR"
+  if [ ! -s "$KSO_LIB" ]; then
+    cat > "$KSO_LIB" <<'LIB'
+#!/usr/bin/env bash
+set -o pipefail
+KSO_ETC_DIR="/etc/kso"; KSO_INFODIST="$KSO_ETC_DIR/infodist"
+kso_err(){ printf "❌ %s\n" "$*" >&2; }
+kso_detect_distro(){
+  [ -r /etc/os-release ] && . /etc/os-release
+  DIST_ID="${ID:-unknown}"; DIST_NAME="${NAME:-Unknown}"; DIST_VERSION_ID="${VERSION_ID:-}"; DIST_VERSION_CODENAME="${VERSION_CODENAME:-}"; DIST_ID_LIKE="${ID_LIKE:-}"
+  if echo "$DIST_ID $DIST_ID_LIKE" | grep -qi ubuntu; then DIST_FAMILY="ubuntu"; else DIST_FAMILY="debian"; fi
+  [ -r /etc/karmaos-release ] && KARM_RELEASE_ID="$(grep -E '^VERSION_ID=' /etc/karmaos-release | cut -d= -f2 | tr -d '\"')"
+}
+kso_write_infodist(){
+  mkdir -p "$KSO_ETC_DIR"; : > "$KSO_INFODIST"
+  {
+    echo "DIST_ID=$DIST_ID"
+    echo "DIST_NAME=$DIST_NAME"
+    echo "DIST_VERSION_ID=$DIST_VERSION_ID"
+    echo "DIST_VERSION_CODENAME=$DIST_VERSION_CODENAME"
+    echo "DIST_ID_LIKE=$DIST_ID_LIKE"
+    echo "DIST_FAMILY=$DIST_FAMILY"
+    [ -n "$KARM_RELEASE_ID" ] && echo "KARM_RELEASE_ID=$KARM_RELEASE_ID"
+    echo "KSO_INIT_DATE=$(date -u +%FT%TZ)"
+  } >> "$KSO_INFODIST"
+}
+kso_source_infodist(){ [ -r "$KSO_INFODIST" ] && . "$KSO_INFODIST"; }
+LIB
+    chmod +x "$KSO_LIB"
+  fi
+}
+
+kso_init() {
+  ensure_layout
+  # shellcheck disable=SC1090
+  . "$KSO_LIB"
+  kso_detect_distro
+  kso_write_infodist
+  echo "✅ KSO initialized. Info saved to /etc/kso/infodist"
+  # Pre-download/update commands
+  download_commands >/dev/null 2>&1
+}
+
+download_commands() {
+  for f in "${FILES_TO_DOWNLOAD[@]}"; do
+    url="$REMOTE_BASE_URL/$f"
+    dest="$KSO_COMMANDS_DIR/$f"
+    if curl -fsSL "$url" -o "$dest"; then
+      chmod +x "$dest"
+    else
+      # fallback to /karma
+      curl -fsSL "$FALLBACK_REMOTE/command/$f" -o "$dest" && chmod +x "$dest" || echo "⚠️  Failed to fetch $f"
+    fi
+  done
+}
+
+show_command_help() {
+  case "$1" in
+    init) echo "Detect distro and write /etc/kso/infodist";;
+    updatekso) echo "Update the kso core binary";;
+    update) echo "Update system packages (APT, dialog)";;
+    checkos) echo "Show OS info and pending upgrades";;
+    version) echo "Show distro/KarmaOS version";;
+    config) echo "First-time guided configuration";;
+    cmd) echo "Windows-style shell aliases";;
+    script) echo "Fetch/list/run official KSO scripts";;
+    *) echo "Unknown command: $1";;
+  esac
+}
+
+show_general_help() {
+cat <<EOF
+KSO 2.0 – multi‑distro utility (KarmaOS/Ubuntu/Debian/Zorin)
+
+Usage: kso <command> [args]
+
+Core:
+  init          Detect distro and store metadata in /etc/kso/infodist
+  help [cmd]    Show general or per‑command help
+
+System:
+  update        Update system packages (dialog)
+  updatekso     Update the kso core binary
+  checkos       OS details & available upgrades
+  version       Distro/KarmaOS version
+  config        Guided setup
+  cmd           Win‑style shell
+  script        Official KSO scripts
+
+EOF
+}
+
+run_command() {
+  [ -z "$1" ] && { echo "❌ Please specify a command."; show_general_help; exit 1; }
+  local cmd="$1"; shift || true
+
+  # Auto-init
+  if [ ! -f "/etc/kso/infodist" ] && [ "$cmd" != "init" ] && [ "$cmd" != "help" ]; then
+    echo "ℹ️  /etc/kso/infodist missing — running 'kso init'…"
+    kso_init
+  fi
+
+  # Local command?
+  if [ -x "$KSO_COMMANDS_DIR/$cmd" ]; then
+    "$KSO_COMMANDS_DIR/$cmd" "$@"
+    return $?
+  fi
+
+  # Fetch from primary, then fallback
+  dest="$KSO_COMMANDS_DIR/$cmd"
+  if curl -fsSL "$PRIMARY_REMOTE/command/$cmd" -o "$dest"; then
+    chmod +x "$dest"
+    "$dest" "$@"
+  elif curl -fsSL "$FALLBACK_REMOTE/command/$cmd" -o "$dest"; then
+    chmod +x "$dest"
+    "$dest" "$@"
+  else
+    echo "❌ Unknown command or failed to fetch: $cmd"
+    exit 1
+  fi
+}
+
+case "$1" in
+  ""|"help")
+    if [ -n "$2" ]; then show_command_help "$2"; else show_general_help; fi ;;
+  init) kso_init ;;
+  *) run_command "$@" ;;
+esac
